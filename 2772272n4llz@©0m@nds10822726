@@ -1,0 +1,362 @@
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local TextChatService = game:GetService("TextChatService")
+local RunService = game:GetService("RunService")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+local Whitelist = {LocalPlayer} 
+local Blacklist = {}
+local Target = {}
+local bringLoopConnection = nil
+local targetPlayer = nil
+local bringDistance = 5
+local firing = false
+
+
+local function findPlayerByName(name)
+    name = name:lower()
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr.Name:lower():sub(1, #name) == name then
+            return plr
+        end
+    end
+    return nil
+end
+
+
+local function getPlayerFromInstance(inst)
+    if not inst or typeof(inst) ~= "Instance" then return nil end
+    local cur = inst
+    for i = 1, 12 do
+        local p = Players:GetPlayerFromCharacter(cur)
+        if p then return p end
+        if cur:IsA("Player") then return cur end
+        cur = cur.Parent
+        if not cur then break end
+    end
+    return nil
+end
+
+
+local function getPlayerFromValue(val)
+    if not val then return nil end
+    if typeof(val) == "Instance" then
+        if val:IsA("Player") then return val end
+        local p = Players:GetPlayerFromCharacter(val)
+        if p then return p end
+        return getPlayerFromInstance(val)
+    end
+    return nil
+end
+
+
+local function addWhitelist(name)
+    local plr = findPlayerByName(name)
+    if plr and not table.find(Whitelist, plr) then
+        table.insert(Whitelist, plr)
+        print("[ANTI] Added to whitelist: " .. plr.Name)
+    else
+        print("[ANTI] Player not found or already whitelisted: " .. tostring(name))
+    end
+end
+
+local function removeWhitelist(name)
+    name = name:lower()
+    local removed = false
+    for i = #Whitelist, 1, -1 do
+        local plr = Whitelist[i]
+        if plr and plr.Name:lower():sub(1, #name) == name then
+            table.remove(Whitelist, i)
+            print("[ANTI] Removed from whitelist: " .. plr.Name)
+            removed = true
+        end
+    end
+    if not removed then
+        print("[ANTI] Player not found in whitelist: " .. tostring(name))
+    end
+end
+
+
+local function addBlacklist(plrOrChar)
+    local plr = nil
+    if typeof(plrOrChar) == "Instance" then
+        if plrOrChar:IsA("Player") then
+            plr = plrOrChar
+        else
+            plr = Players:GetPlayerFromCharacter(plrOrChar) or getPlayerFromInstance(plrOrChar)
+        end
+    end
+    if not plr then return end
+
+    if not table.find(Blacklist, plr) then
+        table.insert(Blacklist, plr)
+        print("[ANTI] Added to blacklist: " .. plr.Name)
+
+        
+        local function cleanup()
+            for i = #Blacklist, 1, -1 do
+                if Blacklist[i] == plr then
+                    table.remove(Blacklist, i)
+                    print("[ANTI] Removed from blacklist (death): " .. plr.Name)
+                end
+            end
+        end
+
+        
+        plr.CharacterAdded:Connect(function(char)
+            local hum = char:WaitForChild("Humanoid", 6)
+            if hum then
+                hum.Died:Connect(cleanup)
+            end
+        end)
+
+        
+        if plr.Character then
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            if hum then
+                hum.Died:Connect(cleanup)
+            end
+        end
+    end
+end
+
+
+local function addTarget(name)
+    local plr = findPlayerByName(name)
+    if plr and plr ~= LocalPlayer and not table.find(Target, plr) then
+        table.insert(Target, plr)
+        print("[TARGET] Added to target list: " .. plr.Name)
+    else
+        print("[TARGET] Player not found, is self, or already targeted: " .. tostring(name))
+    end
+end
+
+local function removeTarget(name)
+    name = name:lower()
+    local removed = false
+    for i = #Target, 1, -1 do
+        local plr = Target[i]
+        if not plr or plr.Name:lower():sub(1, #name) == name then
+            table.remove(Target, i)
+            print("[TARGET] Removed from target list: " .. (plr and plr.Name or name))
+            removed = true
+        end
+    end
+    if not removed then
+        print("[TARGET] Player not found in target list: " .. tostring(name))
+    end
+end
+
+local function getValidTargets()
+    local valid = {}
+    for _, t in ipairs(Target) do
+        if t and t.Character and t.Character:FindFirstChild("Head") and not t.Character:FindFirstChild("ForceField") then
+            table.insert(valid, t)
+        end
+    end
+    return valid
+end
+
+
+local function rejoin()
+    TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    print("[SERVER] Attempting to rejoin current server...")
+end
+
+local function serverhop()
+    local servers = {}
+    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100"):format(game.PlaceId)
+    local suc, res = pcall(function()
+        return HttpService:JSONDecode(game:HttpGet(url))
+    end)
+    if suc and res and res.data then
+        for _, v in ipairs(res.data) do
+            if v.id ~= game.JobId and v.playing < v.maxPlayers then
+                table.insert(servers, v.id)
+            end
+        end
+    end
+    if #servers > 0 then
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, servers[math.random(1, #servers)], LocalPlayer)
+        print("[SERVER] Attempting to join a new server...")
+    else
+        print("[SERVER] No available servers found.")
+    end
+end
+
+
+local function startLoopBring(name, distance)
+    targetPlayer = findPlayerByName(name)
+    bringDistance = tonumber(distance) or 5
+    if not targetPlayer then
+        print("[BRING] Player not found: " .. tostring(name))
+        return
+    end
+
+    if bringLoopConnection then
+        bringLoopConnection:Disconnect()
+    end
+
+    bringLoopConnection = RunService.Heartbeat:Connect(function()
+        if targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            local hrpTarget = targetPlayer.Character.HumanoidRootPart
+            local hrpLocal = LocalPlayer.Character.HumanoidRootPart
+            hrpTarget.CFrame = hrpLocal.CFrame * CFrame.new(0, 0, -bringDistance)
+        end
+    end)
+
+    print("[BRING] LoopBring started for " .. targetPlayer.Name .. " at distance " .. bringDistance)
+end
+
+local function stopLoopBring()
+    if bringLoopConnection then
+        bringLoopConnection:Disconnect()
+        bringLoopConnection = nil
+        print("[BRING] LoopBring stopped")
+    end
+end
+
+
+TextChatService.OnIncomingMessage = function(msg)
+    if not msg.Text or not msg.TextSource or msg.TextSource.UserId ~= LocalPlayer.UserId then return end
+    local cmd, arg = msg.Text:match("^(%S+)%s*(.*)$")
+    if not cmd then return end
+    cmd = cmd:lower()
+
+    if cmd == ".aw" and arg ~= "" then
+        addWhitelist(arg)
+    elseif cmd == ".rw" and arg ~= "" then
+        removeWhitelist(arg)
+    elseif cmd == ".cb" then
+        if #Blacklist > 0 then
+            Blacklist = {}
+            print("[ANTI] Cleared all players from blacklist.")
+        else
+            print("[ANTI] Blacklist is already empty.")
+        end
+    elseif cmd == ".add" and arg ~= "" then
+        addTarget(arg)
+    elseif cmd == ".remove" and arg ~= "" then
+        removeTarget(arg)
+    elseif cmd == ";rj" then
+        rejoin()
+    elseif cmd == ";shop" then
+        serverhop()
+    elseif cmd == "/loopbring" and arg ~= "" then
+        local name, distance = arg:match("(%S+)%s*(%d*)")
+        startLoopBring(name, distance)
+    elseif cmd == "/unloop" then
+        stopLoopBring()
+    end
+end
+
+
+Workspace.DescendantAdded:Connect(function(obj)
+    if obj:IsA("BasePart") and obj.Name == "Handle" and obj.Parent and obj.Parent.Name == "Sword" then
+        obj.Touched:Connect(function(hit)
+            local char = hit:FindFirstAncestorOfClass("Model")
+            local plrHit = char and Players:GetPlayerFromCharacter(char)
+            if plrHit and table.find(Whitelist, plrHit) then
+                local owner = getPlayerFromInstance(obj) or getPlayerFromInstance(obj.Parent) or getPlayerFromInstance(obj.Parent.Parent)
+                if owner and owner ~= LocalPlayer then
+                    addBlacklist(owner)
+                    print("[ANTI] Blacklisted sword owner: " .. owner.Name .. " for hitting " .. plrHit.Name)
+                elseif owner == LocalPlayer then
+                    print("[ANTI] Skipped blacklisting: You hit whitelisted player " .. plrHit.Name)
+                end
+            end
+        end)
+    end
+end)
+
+
+Workspace.ChildAdded:Connect(function(child)
+    if child.Name ~= "ThrownKunai" then return end
+
+    local part = child:IsA("BasePart") and child or child:FindFirstChildWhichIsA("BasePart")
+    if not part then return end
+
+    
+    part.Touched:Connect(function(hit)
+        local char = hit:FindFirstAncestorOfClass("Model")
+        local plrHit = char and Players:GetPlayerFromCharacter(char)
+        if plrHit and table.find(Whitelist, plrHit) then
+            local creatorObj = child:FindFirstChild("creator") or child:FindFirstChildWhichIsA("ObjectValue") or child:WaitForChild("creator", 1)
+            local creatorPlayer = creatorObj and getPlayerFromValue(creatorObj.Value)
+            if creatorPlayer and creatorPlayer ~= LocalPlayer then
+                addBlacklist(creatorPlayer)
+                print("[ANTI] Blacklisted kunai creator: " .. creatorPlayer.Name .. " for hitting " .. plrHit.Name)
+            elseif creatorPlayer == LocalPlayer then
+                print("[ANTI] Skipped blacklisting: You hit whitelisted player " .. plrHit.Name)
+            elseif not creatorPlayer then
+                print("[ANTI] Could not resolve kunai creator for hit on " .. plrHit.Name)
+            end
+        end
+    end)
+
+    
+    task.spawn(function()
+        local creatorObj = child:FindFirstChild("creator") or child:WaitForChild("creator", 2)
+        local creatorPlayer = creatorObj and getPlayerFromValue(creatorObj.Value)
+        if creatorPlayer ~= LocalPlayer then return end
+
+        local p = child:IsA("BasePart") and child or child:FindFirstChildWhichIsA("BasePart") or child:WaitForChildWhichIsA("BasePart", 1)
+        if not p then
+            print("[ANTI] Could not find kunai basepart to teleport.")
+            return
+        end
+
+        
+        for _, target in ipairs(Blacklist) do
+            if target and target.Character and target.Character:FindFirstChild("Head") and not target.Character:FindFirstChild("ForceField") then
+                local head = target.Character.Head
+                p.CFrame = head.CFrame
+                p.Velocity = Vector3.new(0, 0, 0)
+                if p:IsA("BasePart") then
+                    p.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                end
+                print("[ANTI] Teleported your kunai to head of: " .. target.Name)
+            end
+        end
+
+        
+        for _, targetPlr in ipairs(getValidTargets()) do
+            local head = targetPlr.Character and targetPlr.Character:FindFirstChild("Head")
+            if head then
+                p.CFrame = head.CFrame
+                print("[TARGET] Teleported your kunai to head of: " .. targetPlr.Name)
+            end
+        end
+    end)
+end)
+
+
+task.spawn(function()
+    while task.wait(0.1) do -- Increased wait time for performance
+        local validTargets = getValidTargets()
+        if #Blacklist == 0 and #validTargets == 0 then
+            firing = false
+        else
+            if not firing then firing = true end
+            local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+            local head = char:FindFirstChild("Head")
+            local shuriken = char:FindFirstChild("Shuriken")
+            if head and shuriken and shuriken:FindFirstChild("HitEvent") then
+                
+                for _, target in ipairs(Blacklist) do
+                    if target and target.Character and target.Character:FindFirstChild("HumanoidRootPart") and not target.Character:FindFirstChild("ForceField") then
+                        local hp = head.Position
+                        shuriken.HitEvent:FireServer(Vector3.new(hp.X, hp.Y + 1000, hp.Z))
+                    end
+                end
+                
+                for _, target in ipairs(validTargets) do
+                    local hp = head.Position
+                    shuriken.HitEvent:FireServer(Vector3.new(hp.X, hp.Y + 1000, hp.Z))
+                end
+            end
+        end
+    end
+end)
